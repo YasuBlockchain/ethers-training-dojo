@@ -1,4 +1,4 @@
-import {Event} from "ethers";
+import {BigNumber, Event} from "ethers";
 
 export interface WalletModel {
     address?: string
@@ -17,8 +17,8 @@ export interface ChainModel {
 export interface ERC20Model {
     name?: string,
     symbol?: string,
-    balanceOfConnectedAccount?: string
-    totalSupply?: string
+    balanceOfConnectedAccount?: BigNumber
+    totalSupply?: BigNumber
     events?: {
         transferFrom?: Event[],
         transferTo?: Event[],

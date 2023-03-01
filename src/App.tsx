@@ -1,15 +1,17 @@
 import React, {FC, useEffect, useState} from 'react';
-import {ethers, Event} from "ethers";
+import {ethers, Event, Transaction} from "ethers";
 import {ERC20Model, WalletModel} from "./models";
 import {CHAIN_GOERLI, CHAIN_POLYGON, ChainList} from "./constants";
 import {toast} from "react-toastify";
 import DataTable, {TableColumn} from "react-data-table-component";
+import {useFormik} from "formik";
+import ABI from "./artifacts/ABI.json"
 
 const queryString = window.location.search;
 const urlParams = new URLSearchParams(queryString);
 const connectAutomtically = urlParams.get('connectAutomatically')
 
-const rpcProvider = new ethers.providers.JsonRpcProvider(`https://goerli.infura.io/v3/${process.env.REACT_APP_INFURA_API_KEY}`)
+const rpcProvider = new ethers.providers.WebSocketProvider(`wss://goerli.infura.io/ws/v3/${process.env.REACT_APP_INFURA_API_KEY}`)
 const web3Provider = new ethers.providers.Web3Provider(window.ethereum)
 
 function App() {
@@ -86,6 +88,15 @@ function App() {
         } else {
             toast.error("No wallet detected")
         }
+    }
+
+    const refreshBalance = (address: string) => {
+        web3Provider.getBalance(address).then(balance => {
+            console.log(balance.toString())
+            setConnectedWallet(prev => ({...prev, balanceInWei: balance.toString()}))
+        }).catch(() => {
+            toast.error("Failed to refresh balance.", {autoClose: false})
+        })
     }
 
     const handleWalletLogout = () => {
@@ -230,7 +241,7 @@ function App() {
 
                     <hr/>
 
-                    {connectedWallet.address && connectedWallet.chain?.id == CHAIN_GOERLI.id && <ERC20Container connectedWallet={connectedWallet}/>}
+                    {connectedWallet.address && connectedWallet.chain?.id == CHAIN_GOERLI.id && <ERC20Container connectedWallet={connectedWallet} refreshBalance={refreshBalance}/>}
                 </>
                 }
 
@@ -242,8 +253,12 @@ function App() {
 
 type ERC20ContainerProps = {
     connectedWallet: WalletModel
+    refreshBalance: (address: string) => void
 }
-const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet}) => {
+const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet, refreshBalance}) => {
+    const [activeTabEvent, setActiveTabEvent] = useState<"transferFrom" | "transferTo">("transferFrom")
+    const [activeWriteContractAction, setActiveWriteContractAction] = useState<"mint" | "transfer" | "burn">()
+
     const [loadingErc20data, setLoadingErc20data] = useState<boolean>(true)
     const [erc20, setErc20] = useState<ERC20Model | null>(null)
 
@@ -271,15 +286,7 @@ const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet}) => {
     const getERC20Data = (signerAddress: string) => {
         setLoadingErc20data(true)
 
-        // @ts-ignore
-        const contract = new ethers.Contract(process.env.REACT_APP_GOERLI_ERC20_TOKEN_ADDRESS, [
-            "function name() view returns (string)",
-            "function symbol() view returns (string)",
-            "function totalSupply() view returns (uint256)",
-            "function balanceOf(address) view returns (uint)",
-            "event Transfer(address indexed from, address indexed to, uint value)"
-        ], rpcProvider)
-
+        const contract = new ethers.Contract((process.env.REACT_APP_GOERLI_ERC20_TOKEN_ADDRESS || ""), ABI, rpcProvider)
 
         // Name
         contract.name().then((name: string) => {
@@ -290,31 +297,41 @@ const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet}) => {
                 setErc20(prev => ({...prev, symbol: symbol}))
                 // Total supplu
                 contract.totalSupply().then((supply: any) => {
-                    setErc20(prev => ({...prev, totalSupply: ethers.utils.formatEther(supply)}))
+                    setErc20(prev => ({...prev, totalSupply: supply}))
 
                     // Balance of signer
                     contract.balanceOf(signerAddress).then((balance: any) => {
 
-                        setErc20(prev => ({...prev, balanceOfConnectedAccount: ethers.utils.formatEther(balance)}))
+                        setErc20(prev => ({...prev, balanceOfConnectedAccount: balance}))
 
                         // Transfers from signer
                         const filterTransferFrom = contract.filters.Transfer(signerAddress, null) // Tokens sent from signer
                         const filterTransferTo = contract.filters.Transfer(null, signerAddress) // Tokens sent to signer
                         contract.queryFilter(filterTransferFrom).then((r: Event[]) => {
-
                             setErc20(prev => ({...prev, events: {...prev?.events, transferFrom: r}}))
+
+
                             contract.queryFilter(filterTransferTo).then((r: Event[]) => {
 
-                                console.log(r)
                                 setErc20(prev => ({...prev, events: {...prev?.events, transferTo: r}}))
 
                                 // Listen to incoming events from signer:
                                 contract.on(filterTransferFrom, (from, to, amount, event) => {
-                                    setErc20(prev => ({...prev, events: {...prev?.events, transferFrom: prev?.events?.transferFrom ? [...prev.events.transferFrom, event] : []}}))
+                                    setErc20(prev => ({
+                                        ...prev,
+                                        events: {...prev?.events, transferFrom: prev?.events?.transferFrom ? [...prev.events.transferFrom, event] : []},
+                                        balanceOfConnectedAccount: prev?.balanceOfConnectedAccount?.sub(amount),
+                                        totalSupply: prev?.totalSupply?.sub(amount)
+                                    }))
                                 });
                                 // Listen to incoming events to signer:
                                 contract.on(filterTransferTo, (from, to, amount, event) => {
-                                    setErc20(prev => ({...prev, events: {...prev?.events, transferTo: prev?.events?.transferTo ? [...prev.events.transferTo, event] : []}}))
+                                    setErc20(prev => ({
+                                        ...prev,
+                                        events: {...prev?.events, transferTo: prev?.events?.transferTo ? [...prev.events.transferTo, event] : []},
+                                        balanceOfConnectedAccount: prev?.balanceOfConnectedAccount?.add(amount),
+                                        totalSupply: prev?.totalSupply?.add(amount)
+                                    }))
                                 });
 
                                 setLoadingErc20data(false)
@@ -341,6 +358,49 @@ const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet}) => {
         })
     }
 
+    const formMint = useFormik<{ value: number }>({
+        initialValues: {
+            value: 1000,
+        },
+        onSubmit: (values, {setSubmitting}) => {
+            setSubmitting(true)
+
+            const contract = new ethers.Contract((process.env.REACT_APP_GOERLI_ERC20_TOKEN_ADDRESS || ""), ABI, web3Provider.getSigner())
+
+            contract.mint(values.value).then((r: Transaction) => {
+                toast.info(<span>Minting in progress ... <a href={`https://goerli.etherscan.io/tx/${r.hash}`} target={"_blank"}>See transaction</a></span>, {autoClose: false})
+                refreshBalance(connectedWallet?.address || '')
+            }).catch(() => {
+                toast.error("Mint failed!")
+            }).finally(() => {
+                setSubmitting(false)
+                setActiveWriteContractAction(undefined)
+            })
+        },
+    });
+
+    const formBurn = useFormik<{ value: number }>({
+        initialValues: {
+            value: 1000,
+        },
+        onSubmit: (values, {setSubmitting}) => {
+            setSubmitting(true)
+
+            const contract = new ethers.Contract((process.env.REACT_APP_GOERLI_ERC20_TOKEN_ADDRESS || ""), ABI, web3Provider.getSigner())
+
+            contract.burn(values.value).then((r: Transaction) => {
+                toast.info(<span>Burning in progress ... <a href={`https://goerli.etherscan.io/tx/${r.hash}`} target={"_blank"}>See transaction</a></span>, {autoClose: false})
+                refreshBalance(connectedWallet?.address || '')
+            }).catch(() => {
+                toast.error("Burn failed!")
+            }).finally(() => {
+                setSubmitting(false)
+                setActiveWriteContractAction(undefined)
+            })
+        },
+    });
+
+
     return <>
         {loadingErc20data && <span>Loading ERC20 data & events...</span>}
 
@@ -359,30 +419,102 @@ const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet}) => {
                             Add {erc20.name} to your Wallet
                         </button>
                     </div>
-                    <ul>
-                        <li>What's the name of the token? {erc20.name}</li>
-                        <li>How many {erc20.symbol} are they circulating (total supply)? {erc20.totalSupply}</li>
-                        <li>How many {erc20.symbol} tokens does the connected account have? {erc20.balanceOfConnectedAccount}</li>
-                    </ul>
 
-                    {/*Transfer from events*/}
-                    <div className={"pt-2"}>
-                        <h5>Transfers From signer</h5>
-                        {erc20.events!.transferFrom!.length > 0 ?
-                            <DataTable columns={columnsTransferFrom} data={erc20.events!.transferFrom || []} pagination/> :
-                            <div className={"text-info"}>No Transfers from {connectedWallet.address}</div>
-                        }
+                    {/* Some basic data */}
+                    <div className={"mb-5"}>
+                        <h3>Read contract</h3>
+                        <ul>
+                            <li>What's the name of the token? {erc20.name}</li>
+                            <li>How many {erc20.symbol} are they circulating (total supply)? {erc20.totalSupply?.toString()}</li>
+                            <li>How many {erc20.symbol} tokens does the connected account have? {erc20.balanceOfConnectedAccount?.toString()}</li>
+                        </ul>
                     </div>
 
+                    <div className={"mb-5"}>
+                        <h3>Write contract</h3>
+                        <div className="row text-center">
+                            <div className="col d-grid">
+                                <button type="button" className="btn btn-primary" onClick={() => setActiveWriteContractAction("mint")}>Mint</button>
+                            </div>
+                            <div className="col d-grid">
+                                <button type="button" className="btn btn-primary" onClick={() => toast.info("Not yet implemented!")}>Transfer</button>
+                            </div>
+                            <div className="col d-grid">
+                                <button type="button" className="btn btn-primary" onClick={() => setActiveWriteContractAction("burn")}>Burn</button>
+                            </div>
+                        </div>
+                        {activeWriteContractAction == "mint" && <>
+                            <form className="row d-flex justify-content-center mt-3" onSubmit={formMint.handleSubmit}>
+                                <div className="col-auto">
+                                    <label className="col-form-label">Value</label>
+                                </div>
+                                <div className="col-auto">
+                                    <input className={"form-control"} value={formMint.values.value} onChange={e => formMint.setFieldValue("value", e.target.value)}/>
+                                </div>
+                                <div className="col-auto">
+                                    <button className={"btn btn-primary"} disabled={formMint.isSubmitting} type={"submit"}>Mint</button>
+                                </div>
+                            </form>
+                        </>}
 
-                    {/*Transfer to events*/}
-                    <div className={"pt-3"}>
-                        <h5>Transfers To Signer</h5>
-                        {erc20.events!.transferTo!.length > 0 ?
-                            <DataTable columns={columnsTransferTo} data={erc20.events!.transferTo || []} pagination/> :
-                            <div className={"text-info"}>No Transfers from {connectedWallet.address}</div>
-                        }
+                        {activeWriteContractAction == "transfer" && <div>
+                            Not implemented yet!
+                        </div>}
+
+                        {activeWriteContractAction == "burn" && <div>
+                            <form className="row d-flex justify-content-center mt-3" onSubmit={formBurn.handleSubmit}>
+                                <div className="col-auto">
+                                    <label className="col-form-label">Value</label>
+                                </div>
+                                <div className="col-auto">
+                                    <input className={"form-control"} value={formBurn.values.value} onChange={e => formBurn.setFieldValue("value", e.target.value)}/>
+                                </div>
+                                <div className="col-auto">
+                                    <button className={"btn btn-primary"} disabled={formBurn.isSubmitting} type={"submit"}>Burn</button>
+                                </div>
+                            </form>
+                        </div>}
                     </div>
+
+                    {/* Events */}
+                    <>
+                        <h3>Events</h3>
+                        <hr/>
+                        <ul className="nav nav-pills nav-fill">
+                            <li className="nav-item">
+                                <span className={`nav-link ${activeTabEvent == 'transferFrom' && 'active'}`} style={{cursor: "pointer"}} onClick={() => setActiveTabEvent('transferFrom')}>
+                                    Transfers From signer
+                                </span>
+                            </li>
+                            <li className="nav-item">
+                                <span className={`nav-link ${activeTabEvent == 'transferTo' && 'active'}`} style={{cursor: "pointer"}} onClick={() => setActiveTabEvent('transferTo')}>
+                                    Transfers To signer
+                                </span>
+                            </li>
+                        </ul>
+
+
+                        {/*Transfer from events*/}
+                        {activeTabEvent == 'transferFrom' &&
+                            <div className={"pt-2"}>
+                                {erc20.events!.transferFrom!.length > 0 ?
+                                    <DataTable columns={columnsTransferFrom} data={erc20.events!.transferFrom || []} pagination/> :
+                                    <div className={"text-info"}>No Transfers from {connectedWallet.address}</div>
+                                }
+                            </div>
+                        }
+
+
+                        {/*Transfer to events*/}
+                        {activeTabEvent == 'transferTo' &&
+                            <div className={"pt-3"}>
+                                {erc20.events!.transferTo!.length > 0 ?
+                                    <DataTable columns={columnsTransferTo} data={erc20.events!.transferTo || []} pagination/> :
+                                    <div className={"text-info"}>No Transfers from {connectedWallet.address}</div>
+                                }
+                            </div>
+                        }
+                    </>
                 </div>
             </div>
         </div>}
