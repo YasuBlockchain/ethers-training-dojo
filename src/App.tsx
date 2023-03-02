@@ -400,6 +400,28 @@ const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet, refreshBalanc
         },
     });
 
+    const formTransfer = useFormik<{ amount: number, recipient: string }>({
+        initialValues: {
+            recipient: '',
+            amount: 1000,
+        },
+        onSubmit: (values, {setSubmitting}) => {
+            setSubmitting(true)
+
+            const contract = new ethers.Contract((process.env.REACT_APP_GOERLI_ERC20_TOKEN_ADDRESS || ""), ABI, web3Provider.getSigner())
+
+            contract.transfer(values.recipient, values.amount).then((r: Transaction) => {
+                toast.info(<span>Transfer in progress ... <a href={`https://goerli.etherscan.io/tx/${r.hash}`} target={"_blank"}>See transaction</a></span>, {autoClose: false})
+                refreshBalance(connectedWallet?.address || '')
+            }).catch(() => {
+                toast.error("Transfer failed!")
+            }).finally(() => {
+                setSubmitting(false)
+                setActiveWriteContractAction(undefined)
+            })
+        },
+    });
+
 
     return <>
         {loadingErc20data && <span>Loading ERC20 data & events...</span>}
@@ -437,7 +459,7 @@ const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet, refreshBalanc
                                 <button type="button" className="btn btn-primary" onClick={() => setActiveWriteContractAction("mint")}>Mint</button>
                             </div>
                             <div className="col d-grid">
-                                <button type="button" className="btn btn-primary" onClick={() => toast.info("Not yet implemented!")}>Transfer</button>
+                                <button type="button" className="btn btn-primary" onClick={() => setActiveWriteContractAction("transfer")}>Transfer</button>
                             </div>
                             <div className="col d-grid">
                                 <button type="button" className="btn btn-primary" onClick={() => setActiveWriteContractAction("burn")}>Burn</button>
@@ -458,7 +480,23 @@ const ERC20Container: FC<ERC20ContainerProps> = ({connectedWallet, refreshBalanc
                         </>}
 
                         {activeWriteContractAction == "transfer" && <div>
-                            Not implemented yet!
+                            <form className="row d-flex justify-content-center mt-3" onSubmit={formTransfer.handleSubmit}>
+                                <div className="col-auto">
+                                    <label className="col-form-label">Recipient</label>
+                                </div>
+                                <div className="col-auto">
+                                    <input className={"form-control"} value={formTransfer.values.recipient} onChange={e => formTransfer.setFieldValue("recipient", e.target.value)}/>
+                                </div>
+                                <div className="col-auto">
+                                    <label className="col-form-label">Amount</label>
+                                </div>
+                                <div className="col-auto">
+                                    <input className={"form-control"} value={formTransfer.values.amount} onChange={e => formTransfer.setFieldValue("amount", e.target.value)}/>
+                                </div>
+                                <div className="col-auto">
+                                    <button className={"btn btn-primary"} disabled={formTransfer.isSubmitting} type={"submit"}>Transfer</button>
+                                </div>
+                            </form>
                         </div>}
 
                         {activeWriteContractAction == "burn" && <div>
